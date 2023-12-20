@@ -6,24 +6,34 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
+// GetTask RPC
 //
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+// special cases:
+//   - an empty task ID means there are no currently assignable tasks, and that
+//     the worker should check again shortly.
+//   - the coordinator will send an error when all jobs are done, signaling the worker may exit
+type GetTaskArgs struct{}
 
-type ExampleArgs struct {
-	X int
+type GetTaskReply struct {
+	Task Task
 }
 
-type ExampleReply struct {
-	Y int
+// CompleteTask RPC
+type CompleteTaskArgs struct {
+	Task_id string
+
+	// the filenames of the files created by the worker
+	// map: for task ID "map-K", output files take form "mr-out-K-i" where i is the partition # (in [0, R))
+	// reduce: for task ID "reduce-J", output files take form "mr-out-J"
+	Filenames []string
 }
 
-// Add your RPC definitions here.
-
+type CompleteTaskReply struct{}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
