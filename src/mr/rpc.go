@@ -1,11 +1,5 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
 import (
 	"os"
 	"strconv"
@@ -15,7 +9,7 @@ import (
 //
 // special cases:
 //   - an empty task ID means there are no currently assignable tasks, and that
-//     the worker should check again shortly.
+//     the worker should check back soon.
 //   - the coordinator will send an error when all jobs are done, signaling the worker may exit
 type GetTaskArgs struct{}
 

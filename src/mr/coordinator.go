@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
-	"os/exec"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -19,38 +17,30 @@ import (
 // (rm -f mr-out-* ||:) && go build -race -buildmode=plugin ../mrapps/wc.go && echo "done building" && go run -race mrcoordinator.go pg-*.txt
 
 // todo:
-// - breakup files into chunks (use `split -C 64m filename`)
-// - check all tests are passing again...
+// - cleanups (can I separate concerns better? but, I should not e.g. mess with task_id, I think it's good actually.)
 
 //
 // State
 //
 
-// The location of a chunk/piece of a file on disk (in the current directory).
-type ChunkHandle struct {
-	Filename string
-	// Offset   int // note: these may change depending on go's file chunk reading interface.
-	// Size     int
-}
-
 // A "map" or "reduce" task to be delegated to workers by the coordinator.
 type Task struct {
 	// uniquely identifies tasks.
-	// map tasks range from "map-0" to "map-<M-1>" (where M is # of chunks)
-	// reduce tasks range from "reduce-0" to "reduce-<R-1>" (where R is # of partitions)
-	// both worker and coordinator will parse this string to infer task type and number.
+	// - map tasks range from "map-0" to "map-<M-1>" (where M is # of chunks)
+	// - reduce tasks range from "reduce-0" to "reduce-<R-1>" (where R is # of partitions)
+	// - both worker and coordinator will parse this string to infer task type and number.
 	Task_id string
 
-	// map tasks: specifies 1 chunk to map
-	// reduce tasks: specifies a list of entire files (not chunks) to reduce
-	Chunk_hanldes []ChunkHandle
+	// map tasks: specifies 1 file to map
+	// reduce tasks: specifies a list of files to reduce
+	Filenames []string
 
 	// static fields
 	R int // note: i tried making this global but worker's copy was always 0. likely b/c worker is in a diff process.
 }
 
 type Coordinator struct {
-	// maps used to track queued and in-progress tasks.
+	// track queued and in-progress tasks.
 	// all keys are Task.Task_ids.
 	todo_map_tasks    map[string]Task
 	todo_reduce_tasks map[string]Task
@@ -69,7 +59,7 @@ type Coordinator struct {
 // Logic
 //
 
-// Assign a map or reduce task to a worker.
+// Assign a task to a worker.
 //
 // The task will be reassigned if not completed within a timeout window (10s)
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
@@ -84,25 +74,22 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 	if len(task_queue) == 0 {
 		if len(c.inflight_tasks) > 0 {
-			fmt.Println("[Coordinator] no tasks to assign at the moment...")
+			fmt.Println("[Coordinator] no tasks to assign now, worker, please wait and try again")
 			return nil
 		} else {
-			return errors.New("mapreduce job is complete. worker, shutdown please")
+			return errors.New("mapreduce job is complete. worker, please shutdown")
 		}
 	}
 
-	// assign a task
-	for k, v := range task_queue { // (hack to choose 1 arbitrary map elem)
+	// assign an arbitrary task
+	for k, v := range task_queue {
 		reply.Task = v
 		delete(task_queue, k)
 		break
 	}
 	c.inflight_tasks[reply.Task.Task_id] = reply.Task
 
-	// fmt.Println("[GetTask] assigned task ", reply.Task.Task_id)
-
-	// launch a timeout-checker that will re-assign the task if not completed within a
-	// reasonable time.
+	// launch a timeout-checker that will re-assign the task if straggling
 	go func(task_id string) {
 		time.Sleep(10 * time.Second)
 
@@ -143,7 +130,7 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 			partition := GetLastToken(fname, "-")
 			reduce_task_id := "reduce-" + partition
 			reduce_task := c.todo_reduce_tasks[reduce_task_id]
-			reduce_task.Chunk_hanldes = append(reduce_task.Chunk_hanldes, ChunkHandle{Filename: fname})
+			reduce_task.Filenames = append(reduce_task.Filenames, fname)
 			c.todo_reduce_tasks[reduce_task_id] = reduce_task
 		}
 	} else {
@@ -189,7 +176,7 @@ func MakeCoordinator(files []string, R int) *Coordinator {
 	// for i, file := range files {
 	// 	// note: paper does chunks of 64MB, but the books inputs are <1MB.
 	// 	ChunkSizeKB := 500
-	// 	split_files = append(split_files, splitFile(file, "split_"+strconv.Itoa(i), ChunkSizeKB)...)
+	// 	split_files = append(split_files, SplitFile(file, "split_"+strconv.Itoa(i), ChunkSizeKB)...)
 	// }
 	// files = split_files
 
@@ -197,11 +184,9 @@ func MakeCoordinator(files []string, R int) *Coordinator {
 	for i, filename := range files {
 		task_id := "map-" + strconv.Itoa(i)
 		c.todo_map_tasks[task_id] = Task{
-			Task_id: task_id,
-			Chunk_hanldes: []ChunkHandle{
-				{Filename: filename}, // todo: depr. this struct
-			},
-			R: R,
+			Task_id:   task_id,
+			Filenames: []string{filename},
+			R:         R,
 		}
 	}
 
@@ -211,7 +196,7 @@ func MakeCoordinator(files []string, R int) *Coordinator {
 		c.todo_reduce_tasks[task_id] = Task{
 			Task_id: task_id,
 			R:       R,
-			// other fields populated at assign-time
+			// files to reduce poplated later
 		}
 	}
 
@@ -223,32 +208,6 @@ func MakeCoordinator(files []string, R int) *Coordinator {
 //
 // Boilerplate
 //
-
-// split a file into chunks and return said chunk filenames.
-// keeps lines intact (required for mapreduce).
-// file prefix must be unique.
-func splitFile(file string, file_prefix string, chunkSizeKB int) []string {
-	size_bytes := strconv.Itoa(chunkSizeKB * 1000)
-	cmd := exec.Command(
-		"gsplit", "-C", size_bytes, "--numeric-suffixes", "--suffix-length=3", file, file_prefix,
-	)
-	_, err := cmd.Output()
-	if err != nil {
-		panic(err)
-	}
-
-	// cmd = exec.Command("ls", file_prefix+"*") // bugged for some reason...
-	cmd = exec.Command("find", ".", "-name", file_prefix+"*")
-	stdout, err2 := cmd.Output()
-	if err2 != nil {
-		panic(err2)
-	}
-
-	splitFn := func(c rune) bool {
-		return c == '\n'
-	}
-	return strings.FieldsFunc(string(stdout), splitFn)
-}
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {

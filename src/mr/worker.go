@@ -64,7 +64,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 func mapHelper(t *Task, mapf func(string, string) []KeyValue) []string {
 	// read file + call map to get KVs
-	filename := t.Chunk_hanldes[0].Filename
+	filename := t.Filenames[0]
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -80,8 +80,8 @@ func mapHelper(t *Task, mapf func(string, string) []KeyValue) []string {
 	var writers []*json.Encoder // use json for easy KV reading/writing
 	var created_filenames []string
 
-	chunk_num := GetLastToken(t.Task_id, "-")
-	f_prefix := "mr-out-" + chunk_num + "-"
+	map_task_num := GetLastToken(t.Task_id, "-")
+	f_prefix := "mr-out-" + map_task_num + "-"
 
 	for i := 0; i < t.R; i++ {
 		fname := f_prefix + strconv.Itoa(i)
@@ -111,9 +111,8 @@ func reduceHelper(t *Task, reducef func(string, []string) string) string {
 	ofile, _ := os.Create(fname)
 	var kva []KeyValue
 
-	// read each file into KV array
-	for _, chunk := range t.Chunk_hanldes {
-		filename := chunk.Filename
+	// collect all KV pairs from files
+	for _, filename := range t.Filenames {
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
